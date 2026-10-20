@@ -19,9 +19,13 @@ ENV/
 .coverage
 htmlcov/
 
+# Databases
+*.sqlite3
+db.sqlite3
+
 # Editor / OS
 .DS_Store
-.idea/
-.vscode/
+.idea
+.vscode
 *.swp
 *.swo
