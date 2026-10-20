@@ -42,7 +42,7 @@ def test_required_apps_are_registered():
 
 # Verify that Django targets the database defined by the task.
 def test_database_targets_profiles_postgresql_database():
-    """Verify the PostgreSQL engine and profiles database name."""
+    """Verify the PostgreSQL engine and the profiles database name."""
     database = settings.DATABASES["default"]
 
     assert database["ENGINE"] == "django.db.backends.postgresql"
