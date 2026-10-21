@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import uuid
 
 import jwt
@@ -14,10 +13,16 @@ pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture
-def keys():
-    priv = Path("certs/jwt_private.pem").read_text()
-    pub = Path("certs/jwt_public.pem").read_text()
-    return priv, pub
+def keys(tmp_path, monkeypatch):
+    """Generate isolated RS256 keys without depending on local secrets."""
+    from scripts.generate_keys import generate_rsa_key_pair
+
+    private_key_path, public_key_path = generate_rsa_key_pair(tmp_path)
+    private_key = private_key_path.read_text(encoding="utf-8")
+    public_key = public_key_path.read_text(encoding="utf-8")
+    monkeypatch.setenv("JWT_PUBLIC_KEY", public_key)
+
+    return private_key, public_key
 
 
 def generate_test_token(
