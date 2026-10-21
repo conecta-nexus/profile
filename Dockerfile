@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT="/venv" \
     PATH="/venv/bin:$PATH" \
-    DJANGO_DEBUG="True" \
+    DJANGO_DEBUG="False" \
     DJANGO_ALLOWED_HOSTS="*" \
     POSTGRES_DB="db_profiles" \
     POSTGRES_USER="postgres" \
@@ -32,6 +32,10 @@ COPY . .
 # Final project sync
 RUN uv sync --frozen --no-dev || uv sync --no-dev
 
+# Ensure entrypoint is executable
+RUN chmod +x entrypoint.sh
+
 EXPOSE 8000
 
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
