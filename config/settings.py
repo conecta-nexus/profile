@@ -15,6 +15,16 @@ from pathlib import Path
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load local .env file if present
+_env_file = BASE_DIR / ".env"
+if _env_file.exists():
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
+
 def get_env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
 
@@ -40,10 +50,12 @@ ALLOWED_HOSTS = [
     host.strip()
     for host in os.getenv(
         "DJANGO_ALLOWED_HOSTS",
-        "localhost,127.0.0.1",
+        "localhost,127.0.0.1,testserver",
     ).split(",")
     if host.strip()
 ]
+if DEBUG and "testserver" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append("testserver")
 
 # Application definition
 
@@ -98,18 +110,27 @@ _db_url = os.getenv("DATABASE_URL")
 if _db_url:
     import urllib.parse
     _parsed = urllib.parse.urlparse(_db_url)
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": _parsed.path.lstrip("/") or os.getenv("POSTGRES_DB", "db_profiles"),
-            "USER": _parsed.username or os.getenv("POSTGRES_USER", "postgres"),
-            "PASSWORD": _parsed.password or os.getenv("POSTGRES_PASSWORD", ""),
-            "HOST": _parsed.hostname or os.getenv("POSTGRES_HOST", "localhost"),
-            "PORT": str(_parsed.port or os.getenv("POSTGRES_PORT", "5432")),
-            "CONN_MAX_AGE": int(os.getenv("POSTGRES_CONN_MAX_AGE", "60")),
-            "CONN_HEALTH_CHECKS": True,
+    if _parsed.scheme in ("sqlite", "sqlite3"):
+        _db_name = _parsed.path.lstrip("/")
+        DATABASES = {
+            "default": {
+                "ENGINE": "django.db.backends.sqlite3",
+                "NAME": _db_name if _db_name else ":memory:",
+            }
         }
-    }
+    else:
+        DATABASES = {
+            "default": {
+                "ENGINE": "django.db.backends.postgresql",
+                "NAME": _parsed.path.lstrip("/") or os.getenv("POSTGRES_DB", "db_profiles"),
+                "USER": _parsed.username or os.getenv("POSTGRES_USER", "postgres"),
+                "PASSWORD": _parsed.password or os.getenv("POSTGRES_PASSWORD", ""),
+                "HOST": _parsed.hostname or os.getenv("POSTGRES_HOST", "localhost"),
+                "PORT": str(_parsed.port or os.getenv("POSTGRES_PORT", "5432")),
+                "CONN_MAX_AGE": int(os.getenv("POSTGRES_CONN_MAX_AGE", "60")),
+                "CONN_HEALTH_CHECKS": True,
+            }
+        }
 else:
     DATABASES = {
         "default": {
@@ -172,6 +193,12 @@ MAILERS = {
 }
 
 REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "apps.core.authentication.RS256JWTAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
     ],
@@ -180,3 +207,8 @@ REST_FRAMEWORK = {
     ],
     "EXCEPTION_HANDLER": "apps.core.exceptions.api_exception_handler",
 }
+
+# Cryptographic Public Key for RS256 JWT Verification (ADR-002)
+JWT_PUBLIC_KEY_PATH = os.getenv("JWT_PUBLIC_KEY_PATH", "certs/jwt_public.pem")
+JWT_ISSUER = os.getenv("JWT_ISSUER", "https://auth.conectanexus.ufps.edu.co")
+JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "conecta-nexus-services")
