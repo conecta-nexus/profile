@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import uuid
 
+from django.conf import settings
 from django.test import RequestFactory
 import jwt
 import pytest
@@ -16,11 +17,14 @@ from apps.core.authentication import (
 
 
 @pytest.fixture
-def keys():
+def keys(tmp_path, monkeypatch):
     from scripts.generate_keys import generate_rsa_key_pair
-    # Ensure keys exist
-    priv, pub = generate_rsa_key_pair("certs")
-    return priv.read_text(), pub.read_text()
+
+    priv, pub = generate_rsa_key_pair(tmp_path)
+    priv_text = priv.read_text(encoding="utf-8")
+    pub_text = pub.read_text(encoding="utf-8")
+    monkeypatch.setenv("JWT_PUBLIC_KEY", pub_text)
+    return priv_text, pub_text
 
 
 def make_token(
