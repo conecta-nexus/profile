@@ -54,6 +54,28 @@ class IsAdmin(BasePermission):
         )
 
 
+class IsInternalServiceOrAdmin(BasePermission):
+    """Allows access to internal service callers with profile:read_internal scope or ADMIN role."""
+
+    message = "Internal service token or administrative scope required."
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        if not request.user or not getattr(request.user, "is_authenticated", False):
+            return False
+
+        if getattr(request.user, "role", None) == "ADMIN":
+            return True
+
+        has_any_scope_fn = getattr(request.user, "has_any_scope", None)
+        if callable(has_any_scope_fn):
+            return bool(
+                has_any_scope_fn("profile:read_internal", "profile:read_all")
+            )
+
+        scopes = set(getattr(request.user, "scopes", []))
+        return bool({"profile:read_internal", "profile:read_all"} & scopes)
+
+
 def HasScope(required_scope: str):
     """Permission class factory requiring a specific OAuth2 scope."""
 
