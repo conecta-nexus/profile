@@ -1,44 +1,49 @@
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 import uuid
 
-import jwt
 import pytest
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from apps.consents.models import DataConsent
-from apps.core.authentication import DEFAULT_JWT_AUDIENCE, DEFAULT_JWT_ISSUER
+from apps.core.authentication import StatelessJWTUser
 from apps.students.models import StudentProfile
 
 pytestmark = pytest.mark.django_db
 
 
-def make_token(
-    user_id: uuid.UUID | str,
-    role: str = "ADMIN",
-    scope: str = "profile:read_internal profile:read_all",
-) -> str:
-    priv_pem = Path("certs/jwt_private.pem").read_text(encoding="utf-8")
-    now = datetime.now(timezone.utc)
+def eligibility_url(user_id: uuid.UUID | str) -> str:
+    """Build the internal eligibility endpoint URL."""
+    return f"/api/v1/profiles/internal/{user_id}/eligibility"
+
+
+def authenticated_client(
+    *,
+    role: str = "SERVICE",
+    scopes: tuple[str, ...] = ("profile:read_internal",),
+) -> APIClient:
+    """Create a client with the stateless principal expected by Profile."""
     payload = {
-        "iss": DEFAULT_JWT_ISSUER,
-        "aud": [DEFAULT_JWT_AUDIENCE, "conecta-nexus-gateway"],
-        "sub": str(user_id),
-        "jti": str(uuid.uuid4()),
-        "iat": int(now.timestamp()),
-        "nbf": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=15)).timestamp()),
-        "type": "access",
-        "email": "service@conectanexus.internal",
+        "sub": str(uuid.uuid4()),
         "role": role,
+        "scope": " ".join(scopes),
         "is_active": True,
-        "scope": scope,
     }
-    return jwt.encode(payload, priv_pem, algorithm="RS256")
+    user = StatelessJWTUser(payload)
+    client = APIClient()
+    client.force_authenticate(user=user, token=payload)
+    return client
 
 
-def create_student(user_id, semester=7, email="student@ufps.edu.co", phone="3001234567"):
+def create_student(
+    user_id: uuid.UUID,
+    *,
+    semester: int = 7,
+    email: str = "student@ufps.edu.co",
+    phone: str | None = "3001234567",
+) -> StudentProfile:
+    """Persist a valid student profile for endpoint tests."""
     return StudentProfile.objects.create(
         user_id=user_id,
         full_name="Carlos Estudiante",
@@ -50,102 +55,118 @@ def create_student(user_id, semester=7, email="student@ufps.edu.co", phone="3001
     )
 
 
-def test_eligibility_requires_authentication():
-    client = APIClient()
-    user_id = uuid.uuid4()
-    res = client.get(f"/api/v1/profiles/internal/{user_id}/eligibility")
-    assert res.status_code in {status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN}
-
-
-def test_eligibility_rejects_unauthorized_scope():
-    caller_id = uuid.uuid4()
-    # Student role without profile:read_internal
-    token = make_token(caller_id, role="STUDENT", scope="profile:student:read")
-
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-    user_id = uuid.uuid4()
-    res = client.get(f"/api/v1/profiles/internal/{user_id}/eligibility")
-    assert res.status_code == status.HTTP_403_FORBIDDEN
-
-
-def test_eligibility_rejects_invalid_uuid():
-    token = make_token(uuid.uuid4(), role="ADMIN")
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-
-    res = client.get("/api/v1/profiles/internal/not-a-valid-uuid/eligibility")
-    assert res.status_code == status.HTTP_400_BAD_REQUEST
-
-
-def test_eligibility_not_found_when_student_does_not_exist():
-    token = make_token(uuid.uuid4(), role="ADMIN")
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-
-    non_existent_user = uuid.uuid4()
-    res = client.get(f"/api/v1/profiles/internal/{non_existent_user}/eligibility")
-    assert res.status_code == status.HTTP_404_NOT_FOUND
-
-
-def test_eligibility_success_eligible_student():
-    student_id = uuid.uuid4()
-    create_student(student_id, semester=7, email="carlos@ufps.edu.co", phone="3109876543")
-
-    DataConsent.objects.create(
-        user_id=student_id,
+def grant_consent(user_id: uuid.UUID) -> DataConsent:
+    """Persist the accepted consent required for eligibility."""
+    return DataConsent.objects.create(
+        user_id=user_id,
         policy_version="v1.0-2026",
         is_accepted=True,
         ip_address="127.0.0.1",
-        user_agent="Agent",
+        user_agent="pytest-client",
     )
 
-    token = make_token(uuid.uuid4(), role="SERVICE", scope="profile:read_internal")
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
 
-    res = client.get(f"/api/v1/profiles/internal/{student_id}/eligibility")
-    assert res.status_code == status.HTTP_200_OK
+def test_eligibility_requires_authentication():
+    response = APIClient().get(eligibility_url(uuid.uuid4()))
 
-    data = res.data
-    assert data["user_id"] == str(student_id)
-    assert data["is_eligible"] is True
-    assert data["current_semester"] == 7
-    assert data["has_consent"] is True
-    assert data["contact_info"] == {
-        "email": "carlos@ufps.edu.co",
-        "phone": "3109876543",
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_eligibility_rejects_caller_without_internal_scope():
+    client = authenticated_client(
+        role="STUDENT",
+        scopes=("profile:student:read",),
+    )
+
+    response = client.get(eligibility_url(uuid.uuid4()))
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+def test_eligibility_rejects_invalid_user_id():
+    client = authenticated_client()
+
+    response = client.get(eligibility_url("not-a-valid-uuid"))
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert "user_id" in response.data["error"]["details"]
+
+
+def test_eligibility_returns_not_found_for_unknown_student():
+    client = authenticated_client()
+
+    response = client.get(eligibility_url(uuid.uuid4()))
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.parametrize("semester", [6, 10])
+def test_eligibility_accepts_semester_boundaries(semester):
+    student_id = uuid.uuid4()
+    create_student(
+        student_id,
+        semester=semester,
+        email="carlos@ufps.edu.co",
+        phone="3109876543",
+    )
+    grant_consent(student_id)
+    client = authenticated_client()
+
+    response = client.get(eligibility_url(student_id))
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data == {
+        "user_id": str(student_id),
+        "is_eligible": True,
+        "current_semester": semester,
+        "has_consent": True,
+        "contact_info": {
+            "email": "carlos@ufps.edu.co",
+            "phone": "3109876543",
+        },
     }
 
 
-def test_eligibility_ineligible_when_consent_missing():
+def test_eligibility_is_false_without_consent():
     student_id = uuid.uuid4()
-    create_student(student_id, semester=8, email="carlos@ufps.edu.co", phone=None)
+    create_student(student_id, semester=8, phone=None)
+    client = authenticated_client()
 
-    # No DataConsent created for student_id
+    response = client.get(eligibility_url(student_id))
 
-    token = make_token(uuid.uuid4(), role="ADMIN")
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-
-    res = client.get(f"/api/v1/profiles/internal/{student_id}/eligibility")
-    assert res.status_code == status.HTTP_200_OK
-
-    data = res.data
-    assert data["user_id"] == str(student_id)
-    assert data["is_eligible"] is False
-    assert data["has_consent"] is False
-    assert data["current_semester"] == 8
-    assert data["contact_info"]["email"] == "carlos@ufps.edu.co"
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data["is_eligible"] is False
+    assert response.data["current_semester"] == 8
+    assert response.data["has_consent"] is False
 
 
-def test_eligibility_allowed_with_admin_role_without_scope():
+@pytest.mark.parametrize("semester", [5, 11])
+def test_eligibility_is_false_outside_semester_range(semester):
+    """Exercise the endpoint branch without weakening the database constraint."""
+    student_id = uuid.uuid4()
+    grant_consent(student_id)
+    student = SimpleNamespace(
+        current_semester=semester,
+        contact_email="student@ufps.edu.co",
+        contact_phone="3001234567",
+    )
+    client = authenticated_client()
+
+    with patch("apps.core.views.StudentProfile.objects.filter") as student_filter:
+        student_filter.return_value.first.return_value = student
+        response = client.get(eligibility_url(student_id))
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data["is_eligible"] is False
+    assert response.data["current_semester"] == semester
+    assert response.data["has_consent"] is True
+
+
+def test_eligibility_allows_admin_without_internal_scope():
     student_id = uuid.uuid4()
     create_student(student_id, semester=6)
+    client = authenticated_client(role="ADMIN", scopes=())
 
-    token = make_token(uuid.uuid4(), role="ADMIN", scope="")
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+    response = client.get(eligibility_url(student_id))
 
-    res = client.get(f"/api/v1/profiles/internal/{student_id}/eligibility")
-    assert res.status_code == status.HTTP_200_OK
+    assert response.status_code == status.HTTP_200_OK
